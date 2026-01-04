@@ -1,0 +1,211 @@
+0. What you will use
+
+Argo Rollouts
+
+ApplicationSet → deploy to all spokes
+
+Rollout strategy → Canary or Blue-Green per spoke
+
+1. Install Argo Rollouts on ALL spokes (one time)
+
+Run once per spoke cluster:
+
+kubectl --context kind-spoke-dev create ns argo-rollouts
+kubectl --context kind-spoke-dev apply -n argo-rollouts \
+-f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+
+kubectl --context kind-spoke-prod create ns argo-rollouts
+kubectl --context kind-spoke-prod apply -n argo-rollouts \
+-f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+
+
+Verify:
+
+kubectl --context kind-spoke-dev get pods -n argo-rollouts
+
+2. CANARY deployment (per spoke)
+Rollout manifest (rollout-canary.yaml)
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: nginx
+spec:
+  replicas: 5
+  strategy:
+    canary:
+      steps:
+      - setWeight: 20
+      - pause: {duration: 60}
+      - setWeight: 50
+      - pause: {duration: 120}
+      - setWeight: 100
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.25
+        ports:
+        - containerPort: 80
+
+
+Service:
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+spec:
+  selector:
+    app: nginx
+  ports:
+  - port: 80
+    targetPort: 80
+
+3. BLUE-GREEN deployment (per spoke)
+Rollout manifest (rollout-bluegreen.yaml)
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: nginx
+spec:
+  replicas: 4
+  strategy:
+    blueGreen:
+      activeService: nginx-active
+      previewService: nginx-preview
+      autoPromotionEnabled: false
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.25
+        ports:
+        - containerPort: 80
+
+
+Services:
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-active
+spec:
+  selector:
+    app: nginx
+  ports:
+  - port: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-preview
+spec:
+  selector:
+    app: nginx
+  ports:
+  - port: 80
+
+
+Promotion command:
+
+kubectl argo rollouts promote nginx
+
+
+Rollback:
+
+kubectl argo rollouts abort nginx
+
+4. ApplicationSet → deploy Rollouts to ALL spokes
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: nginx-rollout-all-spokes
+  namespace: argocd
+spec:
+  generators:
+  - clusters:
+      selector:
+        matchLabels:
+          environment: spoke
+  template:
+    metadata:
+      name: nginx-{{name}}
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/<YOUR_REPO>.git
+        targetRevision: main
+        path: apps/nginx/rollout
+      destination:
+        name: '{{name}}'
+        namespace: nginx
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+        - CreateNamespace=true
+
+
+Result:
+
+Same rollout logic
+
+Runs independently per spoke
+
+One Git commit → rollout everywhere
+
+5. Observe rollout status (per spoke)
+kubectl argo rollouts get rollout nginx -n nginx --watch
+
+
+Per cluster:
+
+kubectl --context kind-spoke-dev argo rollouts get rollout nginx -n nginx
+kubectl --context kind-spoke-prod argo rollouts get rollout nginx -n nginx
+
+6. Per-spoke strategy control (advanced)
+
+Label clusters:
+
+kubectl label secret -n argocd \
+-l argocd.argoproj.io/secret-type=cluster \
+deployment=canary --overwrite
+
+
+ApplicationSet path switch:
+
+path: apps/nginx/{{metadata.labels.deployment}}
+
+
+Repo:
+
+apps/nginx/canary/
+apps/nginx/bluegreen/
+
+7. Enterprise best practice (interview-ready)
+Use case	Strategy
+Dev / QA	Canary
+Staging	Canary + metrics
+Production	Blue-Green
+Multi-cluster	ApplicationSet
+Rollback	Instant (Rollouts)
+Final takeaway
+
+ApplicationSet = multi-cluster orchestration
+
+Argo Rollouts = per-cluster traffic control
+
+This is exactly how enterprises do GitOps rollouts
