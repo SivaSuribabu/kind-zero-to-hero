@@ -1,0 +1,128 @@
+1. Prerequisites (one-time)
+
+Confirm clusters are registered:
+
+argocd cluster list
+
+
+You must see:
+
+kind-spoke-dev
+kind-spoke-prod
+
+2. Label the spoke clusters (IMPORTANT)
+
+ApplicationSet selects clusters by labels.
+
+kubectl label secret -n argocd \
+-l argocd.argoproj.io/secret-type=cluster \
+environment=spoke --overwrite
+
+
+Verify:
+
+kubectl get secret -n argocd -l environment=spoke
+
+3. Repository structure (example)
+
+Your Git repo must look like this:
+
+repo/
+└── apps/
+    └── nginx/
+        ├── deployment.yaml
+        └── service.yaml
+
+
+(Any app works: Helm, Kustomize, raw YAML.)
+
+4. ApplicationSet (DEPLOY TO ALL SPOKES)
+
+Create applicationset.yaml:
+
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: spokes-nginx
+  namespace: argocd
+spec:
+  generators:
+  - clusters:
+      selector:
+        matchLabels:
+          environment: spoke
+  template:
+    metadata:
+      name: nginx-{{name}}
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/<YOUR_GIT_REPO>.git
+        targetRevision: main
+        path: apps/nginx
+      destination:
+        name: '{{name}}'
+        namespace: nginx
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+        - CreateNamespace=true
+
+
+Apply:
+
+kubectl apply -f applicationset.yaml
+
+5. Verify deployment
+Argo CD view
+argocd app list
+
+
+You should see:
+
+nginx-kind-spoke-dev
+nginx-kind-spoke-prod
+
+Kubernetes view
+kubectl --context kind-spoke-dev get pods -n nginx
+kubectl --context kind-spoke-prod get pods -n nginx
+
+6. Add a NEW spoke cluster (auto-deploy demo)
+kind create cluster --name spoke-stage
+argocd cluster add kind-spoke-stage
+
+
+Label is already matched → deployment happens automatically.
+
+7. Advanced: Environment-specific values (optional)
+Repo layout
+apps/
+└── nginx/
+    ├── base/
+    └── overlays/
+        ├── dev/
+        └── prod/
+
+
+Update path dynamically:
+
+path: apps/nginx/overlays/{{metadata.labels.environment}}
+
+8. Production best practices (short)
+
+Use ApplicationSet + Git only (no manual apps)
+
+Separate infra repo and app repo
+
+Replace cluster-admin with scoped RBAC
+
+One hub Argo CD per environment (prod / non-prod)
+
+Common mistakes (avoid these)
+
+❌ Using Minikube
+❌ Using --server flag
+❌ No cluster labels
+❌ Mixing manual Applications with ApplicationSet
