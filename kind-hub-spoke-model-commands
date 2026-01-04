@@ -1,0 +1,153 @@
+1. Prerequisites
+docker --version
+kubectl version --client
+kind version
+
+2. Create the clusters (hub + 2 spokes)
+kind create cluster --name hub
+kind create cluster --name spoke-dev
+kind create cluster --name spoke-prod
+
+
+Verify:
+
+kind get clusters
+kubectl config get-contexts
+
+
+You should see:
+
+kind-hub
+kind-spoke-dev
+kind-spoke-prod
+
+3. Verify shared networking (critical for Argo CD)
+docker network inspect kind | grep -E "hub|spoke"
+
+
+All nodes must be on the same Docker network named kind.
+
+4. Install Argo CD on the HUB cluster
+kubectl config use-context kind-hub
+kubectl create namespace argocd
+kubectl apply -n argocd \
+-f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+
+Wait until ready:
+
+kubectl -n argocd get pods -w
+
+5. Access Argo CD UI (safe method)
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+
+
+Get admin password:
+
+kubectl -n argocd get secret argocd-initial-admin-secret \
+-o jsonpath="{.data.password}" | base64 -d
+
+
+Login:
+
+argocd login localhost:8080 --username admin --password <PASSWORD> --insecure
+
+6. Add SPOKE clusters to the HUB (this will work)
+argocd cluster add kind-spoke-dev
+argocd cluster add kind-spoke-prod
+
+
+Verify:
+
+argocd cluster list
+
+
+Expected:
+
+https://kubernetes.default.svc   (hub)
+https://kind-spoke-dev-control-plane:6443
+https://kind-spoke-prod-control-plane:6443
+
+7. Deploy a test app to both spokes (sanity check)
+
+Create namespaces:
+
+kubectl --context kind-spoke-dev create ns demo
+kubectl --context kind-spoke-prod create ns demo
+
+
+Create an Argo CD Application (example: nginx):
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-nginx-dev
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/kubernetes/examples.git
+    targetRevision: master
+    path: guestbook
+  destination:
+    name: kind-spoke-dev
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+
+Apply:
+
+kubectl apply -f app-dev.yaml
+
+
+Repeat for kind-spoke-prod.
+
+8. Advanced: Multi-node clusters (optional)
+
+Create config:
+
+cat <<EOF > kind-multi.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+- role: worker
+- role: worker
+EOF
+
+
+Create:
+
+kind create cluster --name hub --config kind-multi.yaml
+kind create cluster --name spoke-dev --config kind-multi.yaml
+kind create cluster --name spoke-prod --config kind-multi.yaml
+
+9. Advanced: Ingress on hub (optional)
+kubectl apply -f \
+https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+
+10. Operations & cleanup
+
+List clusters:
+
+kind get clusters
+
+
+Delete all:
+
+kind delete cluster --name hub
+kind delete cluster --name spoke-dev
+kind delete cluster --name spoke-prod
+
+Key rules (do not skip)
+
+Never use --server with Argo CD on KIND
+
+Do not use Minikube for hub–spoke
+
+Port-forward for UI; contexts for cluster add
+
+KIND works because APIs are routable via Docker network
